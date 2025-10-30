@@ -1,0 +1,351 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPI.h>
+#include <LoRa.h>
+
+// WiFi Access Point Settings
+const char* ssid = "ESP32-LoRa-Gateway";
+const char* password = "12345678";
+
+// Web Server
+WebServer server(80);
+
+// LoRa Pin Definitions
+#define SCK 18
+#define MISO 19
+#define MOSI 23
+#define SS 5
+#define RST 14
+#define DIO0 2
+
+// LoRa Parameters
+long frequency = 433E6;  // 433MHz untuk RA-02
+int spreadingFactor = 7; // SF7 (range 6-12)
+long signalBandwidth = 125E3; // 125kHz
+int codingRateDenominator = 5; // CR 4/5
+
+String lastSentMessage = "Belum ada pesan terkirim";
+String loraStatus = "Not Initialized";
+int messageCounter = 0;
+
+// HTML Interface
+String htmlPage = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+  <title>ESP32 LoRa Messenger (SX1278)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { 
+      font-family: Arial; 
+      text-align: center; 
+      margin: 20px;
+      background: #f0f0f0;
+    }
+    .container {
+      max-width: 500px;
+      margin: 0 auto;
+      background: white;
+      padding: 20px;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    input, textarea, button, select {
+      width: 100%;
+      margin: 10px 0;
+      padding: 12px;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      box-sizing: border-box;
+    }
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    button:hover {
+      background: #45a049;
+    }
+    .status {
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 5px;
+    }
+    .success { background: #d4edda; color: #155724; }
+    .error { background: #f8d7da; color: #721c24; }
+    .message {
+      background: #e9ecef;
+      padding: 15px;
+      border-radius: 5px;
+      margin: 10px 0;
+      text-align: left;
+    }
+    .received-box {
+      background: #d1ecf1;
+      padding: 10px;
+      margin: 5px 0;
+      border-radius: 5px;
+      text-align: left;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>📡 ESP32 SX1278 Messenger</h1>
+    <p>Frekuensi: 433MHz | SF: %SPREADINGFACTOR%</p>
+    
+    <form action="/send" method="POST">
+      <textarea name="message" placeholder="Tulis pesan di sini..." rows="4" required>Hello LoRa!</textarea>
+      <button type="submit">📤 Kirim via LoRa</button>
+    </form>
+
+    <div class="message">
+      <strong>Status Sistem:</strong><br>
+      WiFi: %WIFISTATUS%<br>
+      LoRa: %LORASTATUS%<br>
+      IP: %IPADDRESS%<br>
+      Pesan Terkirim: %MESSAGECOUNT%
+    </div>
+
+    <h3>📨 Pesan Terakhir Terkirim:</h3>
+    <div class="received-box">%LASTMESSAGE%</div>
+
+    <h3>📩 Pesan Diterima:</h3>
+    <div id="receivedMessages">%RECEIVEDMESSAGES%</div>
+
+    <form action="/config" method="POST">
+      <h3>⚙️ Konfigurasi LoRa</h3>
+      <select name="spreadingfactor">
+        <option value="7">Spreading Factor 7</option>
+        <option value="8">Spreading Factor 8</option>
+        <option value="9">Spreading Factor 9</option>
+        <option value="10">Spreading Factor 10</option>
+        <option value="11">Spreading Factor 11</option>
+        <option value="12">Spreading Factor 12</option>
+      </select>
+      <button type="submit">Update Config</button>
+    </form>
+
+    <form action="/broadcast" method="POST">
+      <h3>📢 Broadcast Test</h3>
+      <input type="text" name="broadcast_message" placeholder="Pesan broadcast" value="Test Broadcast">
+      <button type="submit" style="background: #ff9800;">Broadcast ke Semua</button>
+    </form>
+  </div>
+
+  <script>
+    // Auto refresh pesan diterima setiap 3 detik
+    setInterval(function() {
+      fetch('/received')
+        .then(response => response.text())
+        .then(data => {
+          document.getElementById('receivedMessages').innerHTML = data;
+        });
+    }, 3000);
+  </script>
+</body>
+</html>
+)rawliteral";
+
+String receivedMessages = "";
+const int MAX_RECEIVED_MESSAGES = 10;
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Initialize LoRa
+  initializeLoRa();
+  
+  // Initialize WiFi AP
+  setupWiFiAP();
+  
+  // Initialize Web Server
+  setupWebServer();
+  
+  Serial.println("System Ready!");
+  Serial.println("SX1278 LoRa RA-02 + Web Server");
+  Serial.print("Connect to WiFi: ");
+  Serial.println(ssid);
+  Serial.print("Then open: http://");
+  Serial.println(WiFi.softAPIP());
+}
+
+void initializeLoRa() {
+  // Setup LoRa pins
+  LoRa.setPins(SS, RST, DIO0);
+  
+  // Initialize LoRa
+  if (!LoRa.begin(frequency)) {
+    Serial.println("LoRa init failed!");
+    loraStatus = "Init Failed";
+    return;
+  }
+  
+  // Configure LoRa parameters
+  LoRa.setSpreadingFactor(spreadingFactor);
+  LoRa.setSignalBandwidth(signalBandwidth);
+  LoRa.setCodingRate4(codingRateDenominator);
+  LoRa.setSyncWord(0x12); // Sync Word untuk network ID
+  
+  loraStatus = "Ready (433MHz)";
+  Serial.println("LoRa SX1278 Initialized!");
+  Serial.print("Frequency: ");
+  Serial.print(frequency);
+  Serial.print(" | SF: ");
+  Serial.println(spreadingFactor);
+}
+
+void setupWiFiAP() {
+  WiFi.softAP(ssid, password);
+  Serial.print("AP IP address: ");
+  Serial.println(WiFi.softAPIP());
+}
+
+void setupWebServer() {
+  // Root page - HTML interface
+  server.on("/", HTTP_GET, []() {
+    String page = htmlPage;
+    page.replace("%WIFISTATUS%", "Connected");
+    page.replace("%LORASTATUS%", loraStatus);
+    page.replace("%IPADDRESS%", WiFi.softAPIP().toString());
+    page.replace("%LASTMESSAGE%", lastSentMessage);
+    page.replace("%MESSAGECOUNT%", String(messageCounter));
+    page.replace("%SPREADINGFACTOR%", String(spreadingFactor));
+    page.replace("%RECEIVEDMESSAGES%", receivedMessages);
+    server.send(200, "text/html", page);
+  });
+
+  // Send message via LoRa
+  server.on("/send", HTTP_POST, []() {
+    String message = server.arg("message");
+    
+    if (message != "") {
+      // Send via LoRa
+      LoRa.beginPacket();
+      LoRa.print("MSG:" + message);
+      LoRa.endPacket();
+      
+      lastSentMessage = message;
+      messageCounter++;
+      
+      String page = htmlPage;
+      page.replace("%WIFISTATUS%", "Connected");
+      page.replace("%LORASTATUS%", loraStatus);
+      page.replace("%IPADDRESS%", WiFi.softAPIP().toString());
+      page.replace("%LASTMESSAGE%", "✅ Terkirim: " + message);
+      page.replace("%MESSAGECOUNT%", String(messageCounter));
+      page.replace("%SPREADINGFACTOR%", String(spreadingFactor));
+      page.replace("%RECEIVEDMESSAGES%", receivedMessages);
+      
+      server.send(200, "text/html", page);
+      
+      Serial.print("Message sent: ");
+      Serial.println(message);
+    }
+  });
+
+  // LoRa configuration
+  server.on("/config", HTTP_POST, []() {
+    String sf = server.arg("spreadingfactor");
+    
+    if (sf != "") {
+      spreadingFactor = sf.toInt();
+      LoRa.setSpreadingFactor(spreadingFactor);
+      
+      String page = htmlPage;
+      page.replace("%WIFISTATUS%", "Connected");
+      page.replace("%LORASTATUS%", "Config Updated - SF: " + sf);
+      page.replace("%IPADDRESS%", WiFi.softAPIP().toString());
+      page.replace("%LASTMESSAGE%", "Config Updated: SF=" + sf);
+      page.replace("%MESSAGECOUNT%", String(messageCounter));
+      page.replace("%SPREADINGFACTOR%", String(spreadingFactor));
+      page.replace("%RECEIVEDMESSAGES%", receivedMessages);
+      
+      server.send(200, "text/html", page);
+    }
+  });
+
+  // Broadcast message
+  server.on("/broadcast", HTTP_POST, []() {
+    String message = server.arg("broadcast_message");
+    
+    if (message != "") {
+      // Broadcast ke semua device
+      LoRa.beginPacket();
+      LoRa.print("BROADCAST:" + message);
+      LoRa.endPacket();
+      
+      lastSentMessage = "[BROADCAST] " + message;
+      messageCounter++;
+      
+      String page = htmlPage;
+      page.replace("%WIFISTATUS%", "Connected");
+      page.replace("%LORASTATUS%", loraStatus);
+      page.replace("%IPADDRESS%", WiFi.softAPIP().toString());
+      page.replace("%LASTMESSAGE%", "📢 Broadcast: " + message);
+      page.replace("%MESSAGECOUNT%", String(messageCounter));
+      page.replace("%SPREADINGFACTOR%", String(spreadingFactor));
+      page.replace("%RECEIVEDMESSAGES%", receivedMessages);
+      
+      server.send(200, "text/html", page);
+    }
+  });
+
+  // Received messages endpoint for AJAX
+  server.on("/received", HTTP_GET, []() {
+    server.send(200, "text/html", receivedMessages);
+  });
+
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void addReceivedMessage(String message) {
+  String timestamp = String(millis() / 1000) + "s";
+  String newMessage = "<div class='received-box'><strong>" + timestamp + ":</strong> " + message + "</div>";
+  
+  receivedMessages = newMessage + receivedMessages;
+  
+  // Batasi jumlah pesan yang disimpan
+  int count = 0;
+  for (int i = 0; i < receivedMessages.length(); i++) {
+    if (receivedMessages.substring(i, i + 12) == "received-box") {
+      count++;
+    }
+  }
+  
+  if (count > MAX_RECEIVED_MESSAGES) {
+    int lastIndex = receivedMessages.lastIndexOf("<div class='received-box'");
+    if (lastIndex != -1) {
+      receivedMessages = receivedMessages.substring(0, lastIndex);
+    }
+  }
+}
+
+void loop() {
+  server.handleClient();
+  
+  // Check for incoming LoRa messages
+  int packetSize = LoRa.parsePacket();
+  if (packetSize) {
+    // Received a packet
+    String received = "";
+    while (LoRa.available()) {
+      received += (char)LoRa.read();
+    }
+    
+    // Print RSSI of packet
+    Serial.print("Received: ");
+    Serial.print(received);
+    Serial.print(" | RSSI: ");
+    Serial.println(LoRa.packetRssi());
+    
+    // Add to received messages
+    String displayMessage = received + " (RSSI: " + String(LoRa.packetRssi()) + "dBm)";
+    addReceivedMessage(displayMessage);
+  }
+  
+  delay(10);
+}
