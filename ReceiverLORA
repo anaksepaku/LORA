@@ -1,6 +1,15 @@
+#include <WiFi.h>
+#include <WebServer.h>
 #include <SPI.h>
 #include <LoRa.h>
 
+// WiFi Access Point Settings untuk Device 2
+const char* ssid = "ESP32-LoRa-Device2";
+const char* password = "12345678";
+
+WebServer server(80);
+
+// LoRa Pin Definitions
 #define SCK 18
 #define MISO 19
 #define MOSI 23
@@ -8,27 +17,272 @@
 #define RST 14
 #define DIO0 2
 
+// LoRa Parameters
+long frequency = 433E6;
+String deviceName = "Device-2";
+String lastSentMessage = "Belum ada pesan";
+String receivedMessages = "";
+int messageCounter = 0;
+
+// HTML Interface untuk Device 2
+String htmlPage = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+  <title>LoRa Device 2</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { 
+      font-family: Arial; 
+      text-align: center; 
+      margin: 20px;
+      background: #f0f0f0;
+    }
+    .container {
+      max-width: 500px;
+      margin: 0 auto;
+      background: white;
+      padding: 20px;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    input, textarea, button {
+      width: 100%;
+      margin: 10px 0;
+      padding: 12px;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      box-sizing: border-box;
+    }
+    button {
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .device1 { background: #4CAF50; }
+    .device2 { background: #2196F3; }
+    button:hover {
+      opacity: 0.9;
+    }
+    .message {
+      background: #e9ecef;
+      padding: 10px;
+      margin: 5px 0;
+      border-radius: 5px;
+      text-align: left;
+      font-size: 14px;
+    }
+    .sent { background: #d4edda; border-left: 4px solid #4CAF50; }
+    .received { background: #d1ecf1; border-left: 4px solid #2196F3; }
+    .broadcast { background: #fff3cd; border-left: 4px solid #ff9800; }
+    .status {
+      background: #f8f9fa;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 10px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>📡 LoRa Device 2</h1>
+    <div class="status">
+      <strong>Status:</strong><br>
+      IP: %IPADDRESS%<br>
+      Pesan Terkirim: %MESSAGECOUNT%
+    </div>
+    
+    <form action="/send" method="POST">
+      <h3>💬 Kirim ke Device 1</h3>
+      <textarea name="message" placeholder="Tulis pesan untuk Device 1..." rows="3" required>Hello dari Device 2!</textarea>
+      <button type="submit" class="device1">📤 Kirim ke Device 1</button>
+    </form>
+
+    <form action="/broadcast" method="POST">
+      <textarea name="message" placeholder="Pesan broadcast ke semua..." rows="2">Broadcast dari Device 2</textarea>
+      <button type="submit" style="background: #ff9800;">📢 Broadcast ke Semua</button>
+    </form>
+
+    <h3>📨 Kotak Pesan:</h3>
+    <div id="messageBox">%MESSAGEBOX%</div>
+  </div>
+
+  <script>
+    setInterval(function() {
+      fetch('/messages')
+        .then(response => response.text())
+        .then(data => {
+          document.getElementById('messageBox').innerHTML = data;
+        });
+    }, 2000);
+  </script>
+</body>
+</html>
+)rawliteral";
+
 void setup() {
   Serial.begin(115200);
   
-  LoRa.setPins(SS, RST, DIO0);
-  if (!LoRa.begin(433E6)) {
-    Serial.println("LoRa init failed!");
-    while (1);
-  }
+  // Initialize LoRa
+  initializeLoRa();
   
+  // Initialize WiFi AP
+  setupWiFiAP();
+  
+  // Initialize Web Server
+  setupWebServer();
+  
+  Serial.println("Device 2 Ready!");
+  Serial.print("Connect to: ");
+  Serial.println(ssid);
+  Serial.print("IP: ");
+  Serial.println(WiFi.softAPIP());
+}
+
+void initializeLoRa() {
+  LoRa.setPins(SS, RST, DIO0);
+  if (!LoRa.begin(frequency)) {
+    Serial.println("LoRa init failed!");
+    return;
+  }
   LoRa.setSpreadingFactor(7);
   LoRa.setSyncWord(0x12);
+  Serial.println("LoRa Ready pada 433MHz");
+}
+
+void setupWiFiAP() {
+  WiFi.softAP(ssid, password);
+}
+
+void setupWebServer() {
+  server.on("/", HTTP_GET, []() {
+    String page = htmlPage;
+    page.replace("%IPADDRESS%", WiFi.softAPIP().toString());
+    page.replace("%MESSAGECOUNT%", String(messageCounter));
+    page.replace("%MESSAGEBOX%", receivedMessages);
+    server.send(200, "text/html", page);
+  });
+
+  server.on("/send", HTTP_POST, []() {
+    String message = server.arg("message");
+    // MODIFIKASI: Kirim dengan prefix DEVICE2: untuk Device 1
+    sendLoRaMessage("DEVICE2:" + message);
+    
+    String page = htmlPage;
+    page.replace("%IPADDRESS%", WiFi.softAPIP().toString());
+    page.replace("%MESSAGECOUNT%", String(messageCounter));
+    page.replace("%MESSAGEBOX%", receivedMessages);
+    server.send(200, "text/html", page);
+  });
+
+  server.on("/broadcast", HTTP_POST, []() {
+    String message = server.arg("message");
+    sendLoRaMessage("BROADCAST:" + message);
+    
+    String page = htmlPage;
+    page.replace("%IPADDRESS%", WiFi.softAPIP().toString());
+    page.replace("%MESSAGECOUNT%", String(messageCounter));
+    page.replace("%MESSAGEBOX%", receivedMessages);
+    server.send(200, "text/html", page);
+  });
+
+  server.on("/messages", HTTP_GET, []() {
+    server.send(200, "text/html", receivedMessages);
+  });
+
+  server.begin();
+}
+
+void sendLoRaMessage(String message) {
+  LoRa.beginPacket();
+  LoRa.print(message);
+  LoRa.endPacket();
+  lastSentMessage = message;
+  messageCounter++;
   
-  Serial.println("LoRa Receiver Ready!");
+  String timestamp = String(millis() / 1000);
+  
+  // MODIFIKASI: Tampilkan di sent messages dengan format yang sesuai
+  if (message.indexOf("DEVICE2:") != -1) {
+    String cleanMessage = message.substring(8);
+    addMessage("[" + timestamp + "s] 📤 <b>Ke Device 1:</b> " + cleanMessage, "sent");
+  } else if (message.indexOf("BROADCAST:") != -1) {
+    String cleanMessage = message.substring(10);
+    addMessage("[" + timestamp + "s] 📢 <b>Broadcast:</b> " + cleanMessage, "sent");
+  } else {
+    addMessage("[" + timestamp + "s] 📤 " + message, "sent");
+  }
+  
+  Serial.print("Sent: ");
+  Serial.println(message);
+}
+
+void addMessage(String message, String type) {
+  String messageHTML = "<div class='message " + type + "'>" + message + "</div>";
+  receivedMessages = messageHTML + receivedMessages;
+  
+  // Limit messages to 15
+  int count = 0;
+  for (int i = 0; i < receivedMessages.length(); i++) {
+    if (receivedMessages.substring(i, i + 7) == "message") {
+      count++;
+    }
+  }
+  if (count > 15) {
+    int lastIndex = receivedMessages.lastIndexOf("<div class='message");
+    if (lastIndex != -1) {
+      receivedMessages = receivedMessages.substring(0, lastIndex);
+    }
+  }
 }
 
 void loop() {
+  server.handleClient();
+  
+  // Receive LoRa messages
   int packetSize = LoRa.parsePacket();
   if (packetSize) {
-    Serial.print("Received: ");
+    String received = "";
     while (LoRa.available()) {
-      Serial.print((char)LoRa.read());
+      received += (char)LoRa.read();
     }
+    
+    String timestamp = String(millis() / 1000);
+    int rssi = LoRa.packetRssi();
+    
+    Serial.print("Received: ");
+    Serial.print(received);
     Serial.print(" | RSSI: ");
-    Serial.println(LoRa
+    Serial.println(rssi);
+    
+    // === MODIFIKASI: HANDLE PESAN DENGAN PREFIX ===
+    if (received.indexOf("DEVICE1:") != -1) {
+      // Pesan khusus dari Device 1
+      String cleanMessage = received.substring(8); // Hapus "DEVICE1:"
+      addMessage("[" + timestamp + "s] 📨 <b>Dari Device 1:</b> " + cleanMessage + " (RSSI: " + String(rssi) + "dBm)", "received");
+    }
+    else if (received.indexOf("DEVICE2:") != -1) {
+      // Pesan untuk Device 2 (dari device lain)
+      String cleanMessage = received.substring(8);
+      addMessage("[" + timestamp + "s] 📨 <b>Untuk Device 2:</b> " + cleanMessage + " (RSSI: " + String(rssi) + "dBm)", "received");
+    }
+    else if (received.indexOf("BROADCAST:") != -1) {
+      // Pesan broadcast
+      String cleanMessage = received.substring(10);
+      addMessage("[" + timestamp + "s] 📢 <b>Broadcast:</b> " + cleanMessage + " (RSSI: " + String(rssi) + "dBm)", "broadcast");
+    }
+    else {
+      // Pesan biasa tanpa prefix
+      addMessage("[" + timestamp + "s] 📥 " + received + " (RSSI: " + String(rssi) + "dBm)", "received");
+    }
+    
+    // Auto-reply untuk pesan tertentu
+    if (received.indexOf("ping") != -1) {
+      delay(500);
+      sendLoRaMessage("Auto-reply: pong dari " + deviceName);
+    }
+  }
+  
+  delay(10);
+}
